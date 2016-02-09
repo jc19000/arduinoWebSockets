@@ -24,13 +24,29 @@
 
 #include "WebSockets.h"
 
+#ifdef ESP8266
+#include <core_esp8266_features.h>
+#endif
+
 extern "C" {
-#include "libb64/cencode.h"
+#ifdef CORE_HAS_LIBB64
+    #include <libb64/cencode.h>
+#else
+    #include "libb64/cencode_inc.h"
+#endif
 }
 
 #ifdef ESP8266
 #include <Hash.h>
+#else
+
+extern "C" {
+#include "libsha1/libsha1.h"
+}
+
 #endif
+
+#define WEBSOCKETS_MAX_HEADER_SIZE  (14)
 
 /**
  *
@@ -66,7 +82,7 @@ void WebSockets::clientDisconnect(WSclient_t * client, uint16_t code, char * rea
  */
 void WebSockets::sendFrame(WSclient_t * client, WSopcode_t opcode, uint8_t * payload, size_t length, bool mask, bool fin, bool headerToPayload) {
 
-    if(!client->tcp.connected()) {
+    if(client->tcp && !client->tcp->connected()) {
         DEBUG_WEBSOCKETS("[WS][%d][sendFrame] not Connected!?\n", client->num);
         return;
     }
@@ -83,11 +99,13 @@ void WebSockets::sendFrame(WSclient_t * client, WSopcode_t opcode, uint8_t * pay
         DEBUG_WEBSOCKETS("[WS][%d][sendFrame] text: %s\n", client->num, (payload + (headerToPayload ? 14 : 0)));
     }
 
-    uint8_t maskKey[4] = { 0 };
-    uint8_t buffer[14] = { 0 };
+    uint8_t maskKey[4] = { 0x00, 0x00, 0x00, 0x00 };
+    uint8_t buffer[WEBSOCKETS_MAX_HEADER_SIZE] = { 0 };
 
     uint8_t headerSize;
     uint8_t * headerPtr;
+    uint8_t * payloadPtr = payload;
+    bool useInternBuffer = false;
 
     // calculate header Size
     if(length < 126) {
@@ -102,10 +120,26 @@ void WebSockets::sendFrame(WSclient_t * client, WSopcode_t opcode, uint8_t * pay
         headerSize += 4;
     }
 
+
+#ifdef WEBSOCKETS_USE_BIG_MEM
+    // only for ESP since AVR has less HEAP
+    // try to send data in one TCP package (only if some free Heap is there)
+    if(!headerToPayload && ((length > 0) && (length < 1400)) && (ESP.getFreeHeap() > 6000)) {
+        DEBUG_WEBSOCKETS("[WS][%d][sendFrame] pack to one TCP package...\n", client->num);
+        uint8_t * dataPtr = (uint8_t *) malloc(length + WEBSOCKETS_MAX_HEADER_SIZE);
+        if(dataPtr) {
+            memcpy((dataPtr + WEBSOCKETS_MAX_HEADER_SIZE), payload, length);
+            headerToPayload = true;
+            useInternBuffer = true;
+            payloadPtr = dataPtr;
+        }
+    }
+#endif
+
     // set Header Pointer
     if(headerToPayload) {
         // calculate offset in payload
-        headerPtr = (payload + (14 - headerSize));
+        headerPtr = (payloadPtr + (WEBSOCKETS_MAX_HEADER_SIZE - headerSize));
     } else {
         headerPtr = &buffer[0];
     }
@@ -117,7 +151,7 @@ void WebSockets::sendFrame(WSclient_t * client, WSopcode_t opcode, uint8_t * pay
     if(fin) {
         *headerPtr |= bit(7);    ///< set Fin
     }
-    *headerPtr |= opcode;      ///< set opcode
+    *headerPtr |= opcode;        ///< set opcode
     headerPtr++;
 
     // byte 1
@@ -133,7 +167,7 @@ void WebSockets::sendFrame(WSclient_t * client, WSopcode_t opcode, uint8_t * pay
         *headerPtr = ((length >> 8) & 0xFF);    headerPtr++;
         *headerPtr = (length & 0xFF);           headerPtr++;
     } else {
-        // normaly we never get here (to less memory)
+        // Normally we never get here (to less memory)
         *headerPtr |= 127;                      headerPtr++;
         *headerPtr = 0x00;                      headerPtr++;
         *headerPtr = 0x00;                      headerPtr++;
@@ -146,33 +180,61 @@ void WebSockets::sendFrame(WSclient_t * client, WSopcode_t opcode, uint8_t * pay
     }
 
     if(mask) {
-        // todo generate random mask key
-        for(uint8_t x = 0; x < sizeof(maskKey); x++) {
-            // maskKey[x] = random(0xFF);
-            maskKey[x] = 0x00; // fake xor (0x00 0x00 0x00 0x00)
-            *headerPtr = maskKey[x];            headerPtr++;
-        }
+        if(useInternBuffer) {
+            // if we use a Intern Buffer we can modify the data
+            // by this fact its possible the do the masking
+            for(uint8_t x = 0; x < sizeof(maskKey); x++) {
+                maskKey[x] = random(0xFF);
+                *headerPtr = maskKey[x];       headerPtr++;
+            }
 
-        // todo encode XOR (note: using payload not working for static content from flash)
-        //for(size_t x = 0; x < length; x++) {
-        //    payload[x] = (payload[x] ^ maskKey[x % 4]);
-        //}
+            uint8_t * dataMaskPtr;
+
+            if(headerToPayload) {
+                dataMaskPtr = (payloadPtr + WEBSOCKETS_MAX_HEADER_SIZE);
+            } else {
+                dataMaskPtr = payloadPtr;
+            }
+
+            for(size_t x = 0; x < length; x++) {
+                dataMaskPtr[x] = (dataMaskPtr[x] ^ maskKey[x % 4]);
+            }
+
+        } else {
+            *headerPtr = maskKey[0];          headerPtr++;
+            *headerPtr = maskKey[1];          headerPtr++;
+            *headerPtr = maskKey[2];          headerPtr++;
+            *headerPtr = maskKey[3];          headerPtr++;
+        }
     }
+
+#ifndef NODEBUG_WEBSOCKETS
+    unsigned long start = micros();
+#endif
 
     if(headerToPayload) {
         // header has be added to payload
         // payload is forced to reserved 14 Byte but we may not need all based on the length and mask settings
         // offset in payload is calculatetd 14 - headerSize
-        client->tcp.write(&payload[(14 - headerSize)], (length + headerSize));
+        client->tcp->write(&payloadPtr[(WEBSOCKETS_MAX_HEADER_SIZE - headerSize)], (length + headerSize));
     } else {
         // send header
-        client->tcp.write(&buffer[0], headerSize);
+        client->tcp->write(&buffer[0], headerSize);
 
-        if(payload && length > 0) {
+        if(payloadPtr && length > 0) {
             // send payload
-            client->tcp.write(&payload[0], length);
+            client->tcp->write(&payloadPtr[0], length);
         }
     }
+
+    DEBUG_WEBSOCKETS("[WS][%d][sendFrame] sending Frame Done (%uus).\n", client->num, (micros() - start));
+
+#ifdef WEBSOCKETS_USE_BIG_MEM
+    if(useInternBuffer && payloadPtr) {
+        free(payloadPtr);
+    }
+#endif
+
 }
 
 /**
@@ -221,7 +283,7 @@ void WebSockets::handleWebsocket(WSclient_t * client) {
         }
         payloadLen = buffer[0] << 8 | buffer[1];
     } else if(payloadLen == 127) {
-        // read 64bit inteager as length
+        // read 64bit integer as length
         if(!readWait(client, buffer, 8)) {
             //timeout
             clientDisconnect(client, 1002);
@@ -246,7 +308,11 @@ void WebSockets::handleWebsocket(WSclient_t * client) {
     }
 
     if(mask) {
-        client->tcp.read(maskKey, 4);
+        if(!readWait(client, maskKey, 4)) {
+            //timeout
+            clientDisconnect(client, 1002);
+            return;
+        }
     }
 
     if(payloadLen > 0) {
@@ -331,8 +397,13 @@ String WebSockets::acceptKey(String clientKey) {
 #ifdef ESP8266
     sha1(clientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11", &sha1HashBin[0]);
 #else
-#error todo implement sha1 for AVR
+    clientKey += "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    SHA1_CTX ctx;
+    SHA1Init(&ctx);
+    SHA1Update(&ctx, (const unsigned char*)clientKey.c_str(), clientKey.length());
+    SHA1Final(&sha1HashBin[0], &ctx);
 #endif
+
     String key = base64_encode(sha1HashBin, 20);
     key.trim();
 
@@ -373,7 +444,12 @@ bool WebSockets::readWait(WSclient_t * client, uint8_t *out, size_t n) {
     size_t len;
 
     while(n > 0) {
-        if(!client->tcp.connected()) {
+        if(!client->tcp) {
+            DEBUG_WEBSOCKETS("[readWait] tcp is null!\n");
+            return false;
+        }
+
+        if(!client->tcp->connected()) {
             DEBUG_WEBSOCKETS("[readWait] not connected!\n");
             return false;
         }
@@ -383,14 +459,14 @@ bool WebSockets::readWait(WSclient_t * client, uint8_t *out, size_t n) {
             return false;
         }
 
-        if(!client->tcp.available()) {
+        if(!client->tcp->available()) {
 #ifdef ESP8266
             delay(0);
 #endif
             continue;
         }
 
-        len = client->tcp.read((uint8_t*) out, n);
+        len = client->tcp->read((uint8_t*) out, n);
         if(len) {
             t = millis();
             out += len;

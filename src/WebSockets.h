@@ -27,24 +27,63 @@
 
 #include <Arduino.h>
 
-#ifdef ESP8266
-#include <ESP8266WiFi.h>
-#else
-#include <UIPEthernet.h>
-#ifndef UIPETHERNET_H
-#include <Ethernet.h>
-#include <SPI.h>
-#endif
-#endif
-
-//#define DEBUG_WEBSOCKETS(...) Serial1.printf( __VA_ARGS__ )
+//#define DEBUG_WEBSOCKETS(...) Serial.printf( __VA_ARGS__ )
 
 #ifndef DEBUG_WEBSOCKETS
 #define DEBUG_WEBSOCKETS(...)
+#define NODEBUG_WEBSOCKETS
 #endif
 
+#ifdef ESP8266
 #define WEBSOCKETS_MAX_DATA_SIZE  (15*1024)
-#define WEBSOCKETS_TCP_TIMEOUT    (1000)
+#define WEBSOCKETS_USE_BIG_MEM
+#else
+//atmega328p has only 2KB ram!
+#define WEBSOCKETS_MAX_DATA_SIZE  (1024)
+#endif
+
+#define WEBSOCKETS_TCP_TIMEOUT    (1500)
+
+#define NETWORK_ESP8266     (1)
+#define NETWORK_W5100       (2)
+#define NETWORK_ENC28J60    (3)
+
+
+// select Network type based
+#ifdef ESP8266
+#define WEBSOCKETS_NETWORK_TYPE NETWORK_ESP8266
+#else
+#define WEBSOCKETS_NETWORK_TYPE NETWORK_W5100
+#endif
+
+
+#if (WEBSOCKETS_NETWORK_TYPE == NETWORK_ESP8266)
+
+#ifndef ESP8266
+#error "network type ESP8266 only possible on the ESP mcu!"
+#endif
+
+#include <ESP8266WiFi.h>
+#define WEBSOCKETS_NETWORK_CLASS WiFiClient
+#define WEBSOCKETS_NETWORK_SERVER_CLASS WiFiServer
+
+#elif (WEBSOCKETS_NETWORK_TYPE == NETWORK_W5100)
+
+#include <Ethernet.h>
+#include <SPI.h>
+#define WEBSOCKETS_NETWORK_CLASS EthernetClient
+#define WEBSOCKETS_NETWORK_SERVER_CLASS EthernetServer
+
+#elif (WEBSOCKETS_NETWORK_TYPE == NETWORK_ENC28J60)
+
+#include <UIPEthernet.h>
+#define WEBSOCKETS_NETWORK_CLASS UIPClient
+#define WEBSOCKETS_NETWORK_SERVER_CLASS UIPServer
+
+#else
+#error "no network type selected!"
+#endif
+
 
 typedef enum {
     WSC_NOT_CONNECTED,
@@ -75,15 +114,14 @@ typedef struct {
         uint8_t num; ///< connection number
 
         WSclientsStatus_t status;
-#ifdef ESP8266
-        WiFiClient tcp;
-#else
-#ifdef UIPETHERNET_H
-        UIPClient tcp;
-#else
-        EthernetClient tcp;
+
+        WEBSOCKETS_NETWORK_CLASS * tcp;
+
+#if (WEBSOCKETS_NETWORK_TYPE == NETWORK_ESP8266)
+        bool isSSL;             ///< run in ssl mode
+        WiFiClientSecure * ssl;
 #endif
-#endif
+
         String cUrl;        ///< http url
         uint16_t cCode;     ///< http code
 

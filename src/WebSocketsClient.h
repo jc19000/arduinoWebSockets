@@ -26,29 +26,23 @@
 #define WEBSOCKETSCLIENT_H_
 
 #include <Arduino.h>
-
-#ifdef ESP8266
-#include <ESP8266WiFi.h>
-#else
-#include <UIPEthernet.h>
-#ifndef UIPETHERNET_H
-#include <Ethernet.h>
-#include <SPI.h>
-#endif
-#endif
-
 #include "WebSockets.h"
 
 class WebSocketsClient: private WebSockets {
     public:
 
-        typedef void (*WebSocketClientEvent)(WStype_t type, uint8_t * payload, size_t length);
+        typedef std::function<void (WStype_t type, uint8_t * payload, size_t length)> WebSocketClientEvent;
 
         WebSocketsClient(void);
         ~WebSocketsClient(void);
 
-        void begin(const char *host, uint16_t port, const char * url = "/");
-        void begin(String host, uint16_t port, String url = "/");
+        void begin(const char *host, uint16_t port, const char * url = "/", const char * Protocol = "arduino");
+        void begin(String host, uint16_t port, String url = "/", String Protocol = "arduino");
+
+#if (WEBSOCKETS_NETWORK_TYPE == NETWORK_ESP8266)
+        void beginSSL(const char *host, uint16_t port, const char * url = "/", const char * = "", const char * Protocol = "arduino");
+        void beginSSL(String host, uint16_t port, String url = "/", String fingerprint = "", String Protocol = "arduino");
+#endif
 
         void loop(void);
 
@@ -69,6 +63,9 @@ class WebSocketsClient: private WebSockets {
         String _host;
         uint16_t _port;
 
+#if (WEBSOCKETS_NETWORK_TYPE == NETWORK_ESP8266)
+        String _fingerprint;
+#endif
         WSclient_t _client;
 
         WebSocketClientEvent _cbEvent;
@@ -83,6 +80,18 @@ class WebSocketsClient: private WebSockets {
 
         void sendHeader(WSclient_t * client);
         void handleHeader(WSclient_t * client);
+
+        /**
+         * called for sending a Event to the app
+         * @param type WStype_t
+         * @param payload uint8_t *
+         * @param length size_t
+         */
+        virtual void runCbEvent(WStype_t type, uint8_t * payload, size_t length) {
+            if(_cbEvent) {
+                _cbEvent(type, payload, length);
+            }
+        }
 
 };
 

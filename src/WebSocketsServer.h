@@ -26,17 +26,6 @@
 #define WEBSOCKETSSERVER_H_
 
 #include <Arduino.h>
-
-#ifdef ESP8266
-#include <ESP8266WiFi.h>
-#else
-#include <UIPEthernet.h>
-#ifndef UIPETHERNET_H
-#include <Ethernet.h>
-#include <SPI.h>
-#endif
-#endif
-
 #include "WebSockets.h"
 
 #define WEBSOCKETS_SERVER_CLIENT_MAX  (5)
@@ -47,9 +36,9 @@
 class WebSocketsServer: private WebSockets {
 public:
 
-        typedef void (*WebSocketServerEvent)(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
+        typedef std::function<void (uint8_t num, WStype_t type, uint8_t * payload, size_t length)> WebSocketServerEvent;
 
-        WebSocketsServer(uint16_t port);
+        WebSocketsServer(uint16_t port, String origin = "", String protocol = "arduino");
         ~WebSocketsServer(void);
 
         void begin(void);
@@ -79,20 +68,16 @@ public:
         void disconnect(void);
         void disconnect(uint8_t num);
 
+#if (WEBSOCKETS_NETWORK_TYPE == NETWORK_ESP8266)
         IPAddress remoteIP(uint8_t num);
+#endif
 
 protected:
         uint16_t _port;
+        String _origin;
+        String _protocol;
 
-#ifdef ESP8266
-        WiFiServer * _server;
-#else
-#ifdef UIPETHERNET_H
-        UIPServer * _server;
-#else
-        EthernetServer * _server;
-#endif
-#endif
+        WEBSOCKETS_NETWORK_SERVER_CLASS * _server;
 
         WSclient_t _clients[WEBSOCKETS_SERVER_CLIENT_MAX];
 
@@ -115,7 +100,7 @@ protected:
          */
         virtual void handleNonWebsocketConnection(WSclient_t * client) {
             DEBUG_WEBSOCKETS("[WS-Server][%d][handleHeader] no Websocket connection close.\n", client->num);
-            client->tcp.write("HTTP/1.1 400 Bad Request\r\n"
+            client->tcp->write("HTTP/1.1 400 Bad Request\r\n"
                     "Server: arduino-WebSocket-Server\r\n"
                     "Content-Type: text/plain\r\n"
                     "Content-Length: 32\r\n"
@@ -124,6 +109,19 @@ protected:
                     "\r\n"
                     "This is a Websocket server only!");
             clientDisconnect(client);
+        }
+
+        /**
+         * called for sending a Event to the app
+         * @param num uint8_t
+         * @param type WStype_t
+         * @param payload uint8_t *
+         * @param length size_t
+         */
+        virtual void runCbEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+            if(_cbEvent) {
+                _cbEvent(num, type, payload, length);
+            }
         }
 
 };
